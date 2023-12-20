@@ -9,7 +9,7 @@ import os
 import sys
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-
+from ultralytics import YOLO
 font_size = 20
 font_color = (0, 0, 255)
 
@@ -19,8 +19,7 @@ except Exception as e:
     print("Arial font could not be loaded. Using default font.")
     custom_font = ImageFont.load_default()
 
-
-harcascade = "model/haarcascade_russian_plate_number.xml"
+license_plate_detector = YOLO('license_plate_detector.pt')
 
 # Database - рүү холбогдох
 conn = sqlite3.connect('license_plates.db')
@@ -76,48 +75,47 @@ def is_plate_exists(plate_number):
 
 status_window = np.zeros((480, 600, 3), dtype=np.uint8)
 
+current_frame_plates = []
+
+plates_folder = "plates"
+
 while True:
     success, img = cap.read()
 
-    plate_cascade = cv2.CascadeClassifier(harcascade)
+    license_plates = license_plate_detector(img)[0]
 
-    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    for license_plate in license_plates.boxes.data.tolist():
+        x1, y1, x2, y2, score, class_id = license_plate
 
-    plates = plate_cascade.detectMultiScale(img_gray, 1.1, 4)
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
-    current_frame_plates = []
+        # process license plate
+        license_plate_crop = img[int(y1):int(y2), int(x1): int(x2), :]
+        license_plate_crop_gray = cv2.cvtColor(license_plate_crop, cv2.COLOR_BGR2GRAY)
+        _, license_plate_crop_thresh = cv2.threshold(license_plate_crop_gray, 64, 255, cv2.THRESH_BINARY_INV)
 
-    for (x, y, w, h) in plates:
-        area = w * h
+        cv2.imwrite(f"{plates_folder}/roi_{count}.jpg", license_plate_crop)
 
-        if area > min_area:
-            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(img, "License Plate", (x, y - 5), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (255, 0, 255), 2)
+        saved_img = cv2.imread(f"plates/roi_{count}.jpg")
+        saved_img_gray = cv2.cvtColor(saved_img, cv2.COLOR_BGR2GRAY)
+        #cv2.imshow("saved_img_gray", saved_img_gray)
+        saved_img_gray = cv2.resize(saved_img_gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        #cv2.imshow("saved_img_resize", saved_img_gray)
+        saved_img_gray = cv2.GaussianBlur(saved_img_gray, (5, 5), 0)
+        #cv2.imshow("saved_img_blured", saved_img_gray)
+        _, img_thresh = cv2.threshold(saved_img_gray, 128, 255, cv2.THRESH_BINARY_INV)
 
-            img_roi = img[y: y + h, x:x + w]
+        license_plate_number = pytesseract.image_to_string(img_thresh, lang='mon', config='--oem 3 --psm 6')
 
-            cv2.imwrite(f"plates/roi_{count}.jpg", img_roi)
-
-            saved_img = cv2.imread(f"plates/roi_{count}.jpg")
-            saved_img_gray = cv2.cvtColor(saved_img, cv2.COLOR_BGR2GRAY)
-            #cv2.imshow("saved_img_gray", saved_img_gray)
-            saved_img_gray = cv2.resize(saved_img_gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            #cv2.imshow("saved_img_resize", saved_img_gray)
-            saved_img_gray = cv2.GaussianBlur(saved_img_gray, (5, 5), 0)
-            #cv2.imshow("saved_img_blured", saved_img_gray)
-            ret, thresh = cv2.threshold(saved_img_gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
-
-            license_plate_number = pytesseract.image_to_string(saved_img_gray, lang='mon', config='--oem 3 --psm 6')
-
-            filtered_license_plate = re.sub(r'[^0-9АБВГДЕЗИКЛМНОӨПРСТУҮХЦЧЭЯ]', '', license_plate_number)
+        filtered_license_plate = re.sub(r'[^0-9АБВГДЕЗИКЛМНОӨПРСТУҮХЦЧЭЯ]', '', license_plate_number)
 
             # улсын дугаарын формат
-            if re.match(r'^\d{4}[А-ЯҮӨ]{3}$', filtered_license_plate):
-                current_frame_plates.append(filtered_license_plate)
+        if re.match(r'^\d{4}[А-ЯҮӨ]{3}$', filtered_license_plate):
+            current_frame_plates.append(filtered_license_plate)
 
-                text_file_path = f"plates/plate_{count}.txt"
-                with open(text_file_path, "w", encoding="utf-8") as f:
-                    f.write(filtered_license_plate)
+            text_file_path = f"{plates_folder}/plate_{count}.txt"
+            with open(text_file_path, "w", encoding="utf-8") as f:
+                f.write(filtered_license_plate)
 
     detected_plates.extend(current_frame_plates)
 
@@ -169,6 +167,15 @@ while True:
 
     combined_window = np.hstack((img, status_window))
     cv2.imshow("Combined Result", combined_window)
+
+    for file_name in os.listdir(plates_folder):
+        file_path = os.path.join(plates_folder, file_name)
+        creation_time = os.path.getctime(file_path)
+        current_time = time.time()
+        age = current_time - creation_time
+
+        if age > 3:
+            os.remove(file_path)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
